@@ -1,0 +1,205 @@
+---
+title: "Modelling Tax Return by year (Create Dataset)"
+output: html_notebook
+---
+
+
+
+Loading packages
+
+```{r}
+library(tidyverse)
+library(rvest)
+```
+
+Get the dates
+```{r}
+dates_page <- read_html('https://www.irs.gov/newsroom/filing-season-statistics-by-year')
+nodes_date <- dates_page %>% html_nodes("p") %>%  html_text()
+nodes_date
+```
+
+Looks like the dates are in the following formats
+* "%m/%d/%Y"
+* "%m/%d/%y"
+
+```{r}
+dates1 <- (readr::parse_date(nodes_date, format = "%m/%d/%Y"))
+dates1 <- dates1[!is.na(dates1)]
+
+dates2 <- (readr::parse_date(nodes_date, format = "%m/%d/%y"))
+dates2 <- dates2[!is.na(dates2)]
+
+dates <- append(dates1, dates2)
+dates
+```
+
+Are all these dates fridays?
+```{r}
+weekdays(dates)[weekdays(dates) != "Friday"]
+
+# One of them's saturday? Why?
+dates[weekdays(dates) != "Friday"] # looks like new year's
+```
+
+Ok, now I have all of the relevant dates, lets get ready to plug all of those into the links and loop through them
+
+I already know the 2019 syntax looks like
+"https://www.irs.gov/newsroom/filing-season-statistics-for-week-ending-february-1-2019"
+
+Just skimming over the links over top it looks like that same pattern holds up until the first week of 2017
+"https://www.irs.gov/newsroom/filing-season-statistics-for-week-ending-jan-27-2017"
+
+Notice here that the month is abbreviated as 'jan' and not the full 'january'
+
+It doesn't look like those will be a simple for loop, maybe I can grep together some good links
+
+```{r}
+# get links on the page
+links <- dates_page %>% html_nodes("a") %>% html_attr("href")
+
+# get years from grep dates
+years_list <- unique(format(dates, format="%Y"))
+
+links_by_year <- list()
+for (year in years_list){
+  links_by_year[[year]] <- links[grepl(year, links) & !grepl("pdf", links) & !grepl("end-of-year", links)]
+}
+
+links_by_year
+```
+
+Thats a simple thing that came out some trial and error but it basically pulls all links with an explicit year (%Y) in it. 
+It also ignores the PDF dates, as well as the end of the year wrap up stored in the early ones.
+
+Now that we have all the relevant links, let's go figure out how to extract the values out of it...
+```{r eval = FALSE}
+stats_page <- read_html(paste0("https://www.irs.gov/",links_by_year[["2020"]][1]))
+nodes_text <- stats_page %>% html_nodes("tr") %>% html_text()
+
+target_line <- strsplit(nodes_text[grepl('Total Returns Received', nodes_text)][1], split="\n\t\t\t")
+target_split <- unlist(target_line)
+
+return_stats <- str_replace_all(target_split, "[* ]", '')
+
+rs_nums <- readr::parse_number(return_stats)
+rs_clean <- rs_nums[!is.na(rs_nums)]
+
+last_year <- rs_clean[1]
+this_year <- rs_clean[2]
+
+```
+
+
+Ok I worked it out with the first link, let's run that through a loop across all of them and see what we get as a DF.
+
+First thing I need to do is make sure I can map the data frames to all the dates
+```{r}
+# do the links match the dates
+link_date_test <- 
+  tibble(
+    year = unlist(str_extract_all(names(unlist(links_by_year)), '^\\d{3}[a-zA-Z0-9]')),
+    links_by_year = unlist(links_by_year),
+    dates = dates[1:168] # No I have to subset dates just to get things to match
+  )
+
+link_date_test
+```
+with only one value missing off dates, I concluded I'm missing march 23rd 2012 because they use the abreviated year
+https://www.irs.gov/newsroom/newsroom/03-23-12 
+
+I'm honestly surprised this only happened once, but those early years are proving to be unstable
+I could try to work in that extra link, but I'm just going to drop 2011 and 2012 because seven years is more than enough data for what I'm trying to do.
+(plus I get to drop that saturday date)
+
+```{r}
+link_date_map <- link_date_test %>% filter(as.numeric(year) > 2012) %>% rename("link" = links_by_year, "week_ending" = dates)
+link_date_map
+```
+
+
+``` {r}
+scraped_df <- 
+  link_date_map %>% 
+    mutate(
+      link = paste0("https://www.irs.gov/",link),
+      last_year = as.numeric(NA), 
+      this_year = as.numeric(NA)
+      )
+
+for(index in 1:nrow(scraped_df)) {
+  print(paste0("NOW READING ~~~ ", scraped_df[index,]$link))
+  stats_page <- read_html(paste0(scraped_df[index,]$link))
+  nodes_text <- stats_page %>% html_nodes("tr") %>% html_text()
+  
+  target_line <- strsplit(nodes_text[grepl('Total Returns Received', nodes_text)][1], split="\n\t\t\t")
+  target_split <- unlist(target_line)
+  
+  return_stats <- str_replace_all(target_split, "[* ]", '')
+  
+  rs_nums <- readr::parse_number(return_stats)
+  rs_clean <- rs_nums[!is.na(rs_nums)]
+  
+  scraped_df[index,]$last_year <- rs_clean[1]
+  scraped_df[index,]$this_year <- rs_clean[2]
+  
+}
+```
+
+At first pass it seems to work up to October 30th 2015, am I missing something from there out?
+
+Looking at the other inks it looks like 'Total Returns Received' becomes 'Total Receipts'
+Let's subset our result and try to get the others
+```{r}
+scraped_df2 <- scraped_df %>% filter(is.na(this_year))
+
+for(index in 1:nrow(scraped_df2)) {
+  print(paste0("NOW READING ~~~ ", scraped_df2[index,]$link))
+  stats_page <- read_html(paste0(scraped_df2[index,]$link))
+  nodes_text <- stats_page %>% html_nodes("tr") %>% html_text()
+  
+  target_line <- strsplit(nodes_text[grepl('Total Receipts', nodes_text)][1], split="\n\t\t\t")
+  target_split <- unlist(target_line)
+  
+  return_stats <- str_replace_all(target_split, "[* ]", '')
+  
+  rs_nums <- readr::parse_number(return_stats)
+  rs_clean <- rs_nums[!is.na(rs_nums)]
+  
+  scraped_df2[index,]$last_year <- rs_clean[1]
+  scraped_df2[index,]$this_year <- rs_clean[2]
+  
+}
+```
+
+Sick it worked, let's join those together
+```{r}
+final_df <- 
+  scraped_df %>% 
+    left_join(
+      scraped_df2 %>% 
+        select(
+          week_ending, 
+          last_year,
+          this_year
+          ), 
+      by = 'week_ending'
+      ) %>% 
+    mutate(
+      last_year = coalesce(last_year.x, last_year.y),
+      this_year = coalesce(this_year.x, this_year.y)
+      ) %>% 
+    select(
+      year,
+      link,
+      week_ending,
+      last_year,
+      this_year
+    )
+```
+
+Now print it as CSV
+```{r}
+write_csv(final_df, 'IRS_indv_returns_by_week.csv')
+```
+

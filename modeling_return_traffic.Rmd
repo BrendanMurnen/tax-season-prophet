@@ -1,0 +1,41 @@
+---
+title: "Modelling Tax Return by year (Modeling)"
+output: html_notebook
+---
+
+```{r setup}
+options(scipen=999)
+```
+
+
+Load in scraped data from other sheet
+```{r}
+library(tidyverse)
+
+submissions_by_week <- read_csv('IRS_indv_returns_by_week.csv')
+submissions_by_week
+```
+
+plot to see the pattern
+```{r}
+sub_clean <- submissions_by_week %>% mutate(week_ending = lubridate::yday(week_ending))
+
+subs_by_year <- 
+  ggplot(sub_clean, aes(x=as.Date(week_ending, origin = '2020-01-01'), y=this_year, group=year,color=year)) + 
+    geom_point()
+
+subs_by_year
+```
+
+Predictive models
+```{r}
+library(prophet)
+
+df <- submissions_by_week %>% select(ds = 'week_ending', y = 'this_year')
+model <- prophet(df)
+
+future <- make_future_dataframe(model, periods = 52)
+
+forecast <- predict(model, future)
+prophet_plot_components(model, forecast)
+```
